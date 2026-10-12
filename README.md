@@ -1,193 +1,177 @@
 # Simple StyleGAN
 
-A small, readable StyleGAN implementation in PyTorch. The whole model, training loop and sampling code is in one file, [`stylegan.py`](stylegan.py), at about 500 lines including comments.
+A minimal, single-file PyTorch implementation of StyleGAN designed for legibility and quick experimentation. The entire architecture, training loop, and sampling logic are self-contained in [`stylegan.py`](stylegan.py) (~500 lines including inline comments).
 
-It comes with a built-in toy dataset of coloured shapes, so you can train it from scratch on a laptop CPU in about 20 minutes and see results without downloading anything. You can also train it on a folder of your own images.
+Includes an integrated toy dataset of colored geometric shapes—allowing complete training from scratch on a laptop CPU in ~20 minutes with zero external assets required. Custom image datasets are also natively supported.
 
-## What's implemented
+---
 
-| StyleGAN idea | Where in `stylegan.py` |
-|---|---|
-| **Mapping network**: an 8-layer MLP that turns random noise `z` into a style vector `w` | `MappingNetwork` |
-| **Learned constant input**: the generator starts from a trained 4×4 tensor, not from `z` | `Generator.const` |
-| **AdaIN**: `w` sets the scale and shift of every feature map, in every layer | `AdaIN`, `StyleLayer` |
-| **Noise injection**: per-pixel random noise adds fine, stochastic detail | `NoiseInjection` |
-| **Style mixing**: during training, two `w`s are swapped at a random layer | `Generator.forward(mix_prob=...)` |
-| **Truncation trick**: pulls `w` toward the average for cleaner but less varied samples | `Generator.z_to_w(truncation=...)` |
-| Equalized learning rate | `EqualLinear`, `EqualConv2d` |
-| Minibatch standard deviation, in the discriminator | `minibatch_stddev` |
-| Non-saturating logistic loss with lazy R1 regularization | `train()` |
-| EMA copy of the generator, used for all sampling | `train()` → `G_ema` |
+## Core Features & Mechanics
 
-## Architecture
+| Architectural Feature | Function | `stylegan.py` Reference |
+|---|---|---|
+| **Mapping Network** | Converts standard Gaussian noise $z$ into disentangled latent style $w$ via an 8-layer MLP | `MappingNetwork` |
+| **Learned Input Tensor** | Replaces noise input with a learned $4 \times 4$ constant base input | `Generator.const` |
+| **AdaIN Normalization** | Modulates feature map scale and bias per layer using vector $w$ | `AdaIN`, `StyleLayer` |
+| **Noise Injection** | Introduces spatial per-pixel Gaussian noise for stochastic details | `NoiseInjection` |
+| **Style Mixing** | Swaps two distinct $w$ vectors mid-network during training to enforce feature localization | `Generator.forward(mix_prob=...)` |
+| **Truncation Trick** | Scales $w$ toward the empirical mean to trade sample diversity for fidelity | `Generator.z_to_w(truncation=...)` |
+| **Equalized LR** | Dynamically scales weights at runtime for stable learning across all layers | `EqualLinear`, `EqualConv2d` |
+| **Minibatch StdDev** | Passes cross-sample variance to the Discriminator to prevent mode collapse | `minibatch_stddev` |
+| **Lazy R1 Penalty** | Evaluates gradient penalty on real samples every $N$ steps to maintain stability efficiently | `train()` |
+| **Exponential Moving Average** | Maintains an EMA copy of generator weights for evaluation and sampling | `train()` $\rightarrow$ `G_ema` |
+
+---
+
+## Network Architecture & Style Hierarchy
 
 ```
-            z (128)                                Generator (32×32 output)
-               │
-   ┌───────────▼───────────┐            const 4×4 ──► noise ─► AdaIN ◄── w[0]
-   │   Mapping network     │                          conv  ─► noise ─► AdaIN ◄── w[1]
-   │  PixelNorm + 8 × FC   │                                    │
-   └───────────┬───────────┘            upsample ─► conv ─► noise ─► AdaIN ◄── w[2]   8×8
-               │                                    conv ─► noise ─► AdaIN ◄── w[3]
-               w (128)                                          │
-               │                        upsample ─► conv ─► noise ─► AdaIN ◄── w[4]   16×16
-   broadcast to every layer ──────►                 conv ─► noise ─► AdaIN ◄── w[5]
-   (or mix two w's: style mixing)                               │
-                                        upsample ─► conv ─► noise ─► AdaIN ◄── w[6]   32×32
-                                                    conv ─► noise ─► AdaIN ◄── w[7]
-                                                                │
-                                                          1×1 conv ─► RGB image
+            z (128-dim)                           Generator Network (32×32 output)
+                 │
+     ┌───────────▼───────────┐         const 4×4 ─► Noise ─► AdaIN ◄── w[0]
+     │    Mapping Network    │                        Conv  ─► Noise ─► AdaIN ◄── w[1]
+     │ PixelNorm + 8×Linear  │                                   │
+     └───────────┬───────────┘          Upsample ─► Conv ─► Noise ─► AdaIN ◄── w[2]   (8×8)
+                 │                                  Conv ─► Noise ─► AdaIN ◄── w[3]
+                 w (128-dim)                                     │
+                 │                      Upsample ─► Conv ─► Noise ─► AdaIN ◄── w[4]   (16×16)
+   Broadcast across layers ───────────►             Conv ─► Noise ─► AdaIN ◄── w[5]
+   (or apply style mixing)                                       │
+                                        Upsample ─► Conv ─► Noise ─► AdaIN ◄── w[6]   (32×32)
+                                                    Conv ─► Noise ─► AdaIN ◄── w[7]
+                                                                 │
+                                                            1×1 Conv ─► Output RGB
 ```
 
-The discriminator is an ordinary CNN. It takes the image through a 1×1 conv, then repeated [conv, conv, 2× downsample] blocks, then the minibatch-stddev layer, a final conv and fully connected layers, and outputs one real/fake score.
+### Feature Control Progression
+* **Coarse Layers ($4\times4, 8\times8$):** Control high-level geometry, pose, shape, and spatial distribution.
+* **Fine Layers ($16\times16, 32\times32$):** Control micro-features, color palettes, edge sharpening, and surface textures.
 
-Early `w`s (4×4, 8×8) control **coarse** features such as shape, size and position. Later ones (16×16, 32×32) control **fine** features such as colour and texture. The `mix` command makes this visible.
+---
 
-## Installation
+## Setup & Execution
 
-You need Python 3.9 or newer.
+### Installation
+
+Requires **Python 3.9+**. Dependencies are limited to `torch`, `numpy`, and `Pillow` (no `torchvision` required). Hardware acceleration (`cuda` or `mps`) is auto-detected.
 
 ```bash
 pip install -r requirements.txt
 ```
 
-The only dependencies are `torch`, `numpy` and `Pillow`; torchvision is not needed. A GPU (CUDA, or Apple Silicon via MPS) is used automatically if one is available, and everything also runs on a CPU.
-
-## Quick start
+### Quickstart Workflow
 
 ```bash
-# 1. Train on the built-in toy dataset (random circles, squares and triangles)
+# 1. Train on built-in synthetic shapes dataset
 python stylegan.py train
 
-# 2. Sample 16 new images
+# 2. Generate 16 synthetic samples
 python stylegan.py generate --ckpt runs/stylegan/checkpoint.pt
 
-# 3. Make a style-mixing grid
+# 3. Perform a style-mixing matrix export
 python stylegan.py mix --ckpt runs/stylegan/checkpoint.pt
 ```
 
-During training, a sample grid is saved every 500 steps to `runs/stylegan/samples/step_XXXXXX.png`. Every grid uses the same 64 latent vectors, so you can watch the same images take shape.
+*Training logs automatically export fixed-latent sample grids to `runs/stylegan/samples/step_XXXXXX.png` every 500 steps.*
 
-With the defaults (32×32 images, 64 channels, 3000 steps), a run takes about **20–25 minutes on a laptop CPU** at roughly 0.45 s per step. On a GPU it takes a minute or two.
+---
 
-## Train on your own images
+## Working with Custom Datasets
 
-Point `--data` at a folder. It is searched recursively for `.png`, `.jpg`, `.jpeg`, `.bmp` and `.webp` files. Each image is centre-cropped to a square, resized, and randomly flipped left-to-right.
-
-```bash
-python stylegan.py train --data path/to/faces --img-size 64 --channels 128 --steps 20000 --out runs/faces
-```
-
-Some guidelines:
-
-* **Dataset size**: GANs need many images. A few thousand is a sensible minimum; with only a few hundred, the discriminator memorises them.
-* **Resolution**: 32 or 64 is a good place to start. 128 and above works, but needs a GPU and much longer training.
-* **Capacity**: raise `--channels` (128, 256) for real photos. The toy dataset only needs 64.
-* **Resuming**: continue an interrupted run with `--resume runs/faces/checkpoint.pt --steps <new total>`. The architecture settings are read from the checkpoint.
-
-## Generate images
+Point `--data` to any directory containing images (`.png`, `.jpg`, `.jpeg`, `.bmp`, `.webp`). Images are automatically square-cropped, resized, and randomly flipped horizontally.
 
 ```bash
-python stylegan.py generate --ckpt runs/stylegan/checkpoint.pt --n 64 --truncation 0.7 --seed 42 --out samples.png
+python stylegan.py train \
+  --data path/to/dataset \
+  --img-size 64 \
+  --channels 128 \
+  --steps 20000 \
+  --out runs/custom_run
 ```
 
-* `--truncation` (ψ) sets the trade-off between quality and diversity. `1.0` uses raw samples (most varied, most artefacts). `0.5`–`0.7` gives cleaner, more "average" images. `0` returns the average image every time.
-* `--seed` makes the output reproducible.
+### Configuration Guidelines
 
-## Style mixing
+* **Dataset Volume:** Recommended minimum of 2,000+ images. Very small datasets ($< 500$ samples) will result in discriminator overfitting.
+* **Resolution Scaling:** Start at $32\times32$ or $64\times64$. Higher resolutions ($128\times128+$) require dedicated GPUs.
+* **Model Capacity:** Increase `--channels` ($128 \rightarrow 256$) when modeling complex real-world photographic datasets.
+* **Resuming Progress:** Append `--resume runs/custom_run/checkpoint.pt --steps <total_target_steps>`. Hyperparameters automatically restore from saved metadata.
+
+---
+
+## Advanced Options & CLI Reference
+
+### Inference & Sampling
 
 ```bash
-python stylegan.py mix --ckpt runs/stylegan/checkpoint.pt --n 5 --cut 4
+# Generate deterministic samples with truncation controls
+python stylegan.py generate \
+  --ckpt runs/stylegan/checkpoint.pt \
+  --n 64 \
+  --truncation 0.7 \
+  --seed 42 \
+  --out samples.png
+
+# Generate style mixing grid matrix
+python stylegan.py mix \
+  --ckpt runs/stylegan/checkpoint.pt \
+  --n 5 \
+  --cut 4 \
+  --out mixing.png
 ```
 
-This saves an `(n+1) × (n+1)` grid:
+* **Truncation ($\psi$):** Standard range is `0.5`–`0.7`. Values near `1.0` preserve full distribution variation (higher risk of artifacts); values near `0.0` collapse toward the dataset mean image.
+* **Crossover Point (`--cut`):** Layer threshold at which fine styles switch source inputs.
 
-* The **top row** and **left column** are ordinary generated images.
-* Each inner cell takes its **coarse** styles (layers `0 … cut-1`) from the image at the top of its column, and its **fine** styles (the remaining layers) from the image at the left of its row.
+### CLI Command Flags
 
-With the 32×32 model there are 8 style inputs. `--cut 2` borrows only the 4×4 styles (overall layout). `--cut 6` borrows everything except the final 32×32 styles, so only fine colour detail comes from the left image.
-
-## Command-line options
-
-### `train`
-
-| Option | Default | Description |
+#### `train`
+| Flag | Default | Description |
 |---|---|---|
-| `--data` | `shapes` | `shapes` for the built-in toy dataset, or a path to an image folder |
-| `--img-size` | `32` | Output resolution; a power of two, at least 8 |
-| `--z-dim` / `--w-dim` | `128` | Size of the latent `z` and the style vector `w` |
-| `--channels` | `64` | Feature maps per conv layer, in both G and D |
-| `--mapping-layers` | `8` | Depth of the mapping network |
-| `--batch` | `32` | Batch size |
-| `--steps` | `3000` | Total training steps |
-| `--lr` | `0.002` | Adam learning rate, with betas = (0, 0.99) |
-| `--r1` | `0.1` | R1 regularization weight γ (higher means a smoother D and more stable but blurrier results) |
-| `--r1-every` | `4` | Apply R1 every N steps (lazy regularization) |
-| `--mix-prob` | `0.9` | Probability of style mixing for each batch |
-| `--ema` | `0.999` | Decay rate for the EMA generator |
-| `--out` | `runs/stylegan` | Output folder for samples and the checkpoint |
-| `--log-every` / `--sample-every` / `--save-every` | `50` / `500` / `1000` | Logging, sample-grid and checkpoint intervals, in steps |
-| `--resume` | – | Checkpoint to continue training from |
-| `--workers` | `0` | DataLoader worker processes (helps with large image folders) |
-| `--device` | `auto` | `auto`, `cpu`, `cuda` or `mps` |
-| `--seed` | `0` | Random seed |
+| `--data` | `shapes` | Path to image folder or `shapes` for internal dataset |
+| `--img-size` | `32` | Target image resolution (must be power of 2, $\ge 8$) |
+| `--z-dim` / `--w-dim` | `128` | Dimensionality of latent $z$ and style $w$ |
+| `--channels` | `64` | Base feature map count across convolutional layers |
+| `--mapping-layers` | `8` | Layer depth of the MLP mapping network |
+| `--batch` | `32` | Training batch size |
+| `--steps` | `3000` | Target training iteration count |
+| `--lr` | `0.002` | Adam optimizer learning rate ($\beta_1=0, \beta_2=0.99$) |
+| `--r1` | `0.1` | Regularization coefficient $\gamma$ |
+| `--r1-every` | `4` | Interval frequency for lazy R1 loss computation |
+| `--mix-prob` | `0.9` | Probability of style mixing per iteration |
+| `--ema` | `0.999` | Exponential moving average decay rate |
+| `--out` | `runs/stylegan` | Output directory for checkpoints and logs |
+| `--log-every` / `--sample-every` | `50` / `500` | Log frequency / Sample rendering interval |
+| `--resume` | None | Checkpoint path to load state |
+| `--device` | `auto` | Force execution backend (`auto`, `cpu`, `cuda`, `mps`) |
 
-### `generate`
+---
 
-| Option | Default | Description |
-|---|---|---|
-| `--ckpt` | required | Checkpoint to load (its EMA generator is used) |
-| `--n` | `16` | Number of images |
-| `--truncation` | `0.7` | Truncation ψ (`1.0` turns it off) |
-| `--out` | `generated.png` | Output image grid |
+## Diagnostics & Loss Monitoring
 
-### `mix`
-
-| Option | Default | Description |
-|---|---|---|
-| `--ckpt` | required | Checkpoint to load |
-| `--n` | `5` | Number of source images on each axis |
-| `--cut` | half of the layers | How many coarse layers to take from the top row |
-| `--truncation` | `0.7` | Truncation ψ |
-| `--out` | `mixing.png` | Output image grid |
-
-`generate` and `mix` also accept `--device` and `--seed`.
-
-## Output layout
-
-```
-runs/stylegan/
-├── checkpoint.pt          # G, D, EMA generator, optimizers, step, settings
-└── samples/
-    ├── step_000500.png    # 8×8 grid from fixed latents
-    ├── step_001000.png
-    └── ...
-```
-
-Small images are enlarged with nearest-neighbour scaling in saved grids so they are easy to see. The underlying samples are still `--img-size` pixels.
-
-## Reading the training log
-
+Sample stdout output during execution:
 ```
 step   1000 | D 0.912 | G 1.734 | R1 0.052 | 450s
 ```
 
-* **D** is the discriminator loss and **G** the generator loss. In a healthy GAN they move up and down without settling. If D stays near 0 and G keeps growing, the discriminator has won. Try a larger `--r1`, a lower `--lr` or more data.
-* **R1** is the gradient penalty on real images. A steadily rising R1 means D is becoming sharp and overconfident.
-* The sample grids are a better guide than the loss numbers. Look at them.
+* **Loss Equilibrium:** $D$ and $G$ values should fluctuate dynamically. A monotonically declining $D$ loss approaching $0.0$ combined with exploding $G$ loss indicates total discriminator dominance. Remediation: Increase `--r1`, reduce `--lr`, or expand training dataset volume.
+* **R1 regularizer tracking:** Unbounded growth in R1 values signals that the discriminator is developing unstable, overly sharp decision boundaries.
 
-## How this differs from the official StyleGAN
+---
 
-This project is for learning, not for matching the paper's results. To keep the code short:
+## Deviations from Official Paper Implementations
 
-* **No progressive growing.** The networks train at full resolution from the start, as StyleGAN2 does.
-* **AdaIN is kept** (StyleGAN 1). StyleGAN2 replaces it with weight demodulation, which removes the "droplet" artefacts.
-* **The same channel count is used at every resolution**, and the upsampling is plain bilinear interpolation, with no blur filter.
-* There is no path-length regularization, no mixed precision, no adaptive augmentation (ADA), and no FID evaluation.
+This implementation prioritizes architectural readability over state-of-the-art benchmark matching:
 
-## References
+1. **No Progressive Growing:** Operates directly at target output resolution (adopting StyleGAN2 mechanics) rather than growing layers dynamically.
+2. **Standard AdaIN Operations:** Uses direct AdaIN normalization (StyleGAN1) instead of weight demodulation (StyleGAN2).
+3. **Flat Capacity Scaling:** Feature channels remain uniform across spatial steps; bilinear interpolation is used for scaling without antialiasing low-pass filters.
+4. **Omitted Optimization Features:** Excludes path-length regularization, adaptive discriminator augmentation (ADA), mixed precision operations, and FID tracking loops.
 
-* T. Karras, S. Laine, T. Aila. *A Style-Based Generator Architecture for Generative Adversarial Networks.* CVPR 2019. [arXiv:1812.04948](https://arxiv.org/abs/1812.04948)
-* T. Karras et al. *Analyzing and Improving the Image Quality of StyleGAN* (StyleGAN2). CVPR 2020. [arXiv:1912.04958](https://arxiv.org/abs/1912.04958)
-* T. Karras et al. *Progressive Growing of GANs for Improved Quality, Stability, and Variation.* ICLR 2018 (equalized learning rate, minibatch stddev). [arXiv:1710.10196](https://arxiv.org/abs/1710.10196)
-* L. Mescheder, A. Geiger, S. Nowozin. *Which Training Methods for GANs do actually Converge?* ICML 2018 (R1 regularization). [arXiv:1801.04406](https://arxiv.org/abs/1801.04406)
+---
+
+## Key References
+
+* **StyleGAN:** Karras et al., *A Style-Based Generator Architecture for Generative Adversarial Networks* (CVPR 2019). [arXiv:1812.04948](https://arxiv.org/abs/1812.04948)
+* **StyleGAN2:** Karras et al., *Analyzing and Improving the Image Quality of StyleGAN* (CVPR 2020). [arXiv:1912.04958](https://arxiv.org/abs/1912.04958)
+* **Progressive GANs:** Karras et al., *Progressive Growing of GANs for Improved Quality, Stability, and Variation* (ICLR 2018). [arXiv:1710.10196](https://arxiv.org/abs/1710.10196)
+* **R1 Regularization:** Mescheder et al., *Which Training Methods for GANs do actually Converge?* (ICML 2018). [arXiv:1801.04406](https://arxiv.org/abs/1801.04406)
